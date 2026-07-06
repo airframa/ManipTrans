@@ -87,7 +87,7 @@ data/taco/
 - **Sequence lengths vary widely** — 292 frames observed in one sample, hand pkls up to ~17.5MB. Some are much shorter.
 - **Triplet folder names contain parentheses, commas, spaces** — e.g., `(brush, brush, pan)`. Use quoted paths and `glob`, never trust unquoted shell expansion.
 - **Object id cross-reference:** `tool_035.npy` ↔ `object_models_released/035_cm.obj`.
-- **Native FPS is claimed to be 30 Hz** — **not verified locally**, no metadata file. Confirm from TACO paper/repo before proceeding.
+- **Native FPS confirmed at 30 Hz** — see Confirmed conventions section below.
 
 ## Gaps to bridge (implementation checklist)
 
@@ -113,6 +113,23 @@ data/taco/
 - **Fixed random seeds** for anything reproducible (COACD may be non-deterministic — that's fine).
 - **Working inside the ManipTrans repo** on the `taco-retargeting` branch. New files (TACOData class, preprocessing scripts) can be added, ideally under a new `taco/` subfolder or clearly named files. Do not modify existing GRAB / OakInk-V2 / FAVOR loaders. Generated data (URDFs, checkpoints, trajectories) must be `.gitignore`d.
 - **Chosen PoC sequence:** `(brush, brush, pan)/20230919_026` — 292 frames, simple geometry, clean single-behavior motion, all frame counts aligned. Triplet = (action, tool, target).
+
+## Progress log
+
+**M1 — URDF generation: COMPLETE.**
+- `data/taco/meshes_m/035.obj`, `data/taco/meshes_m/057.obj` — cm→m scaled meshes (verified bounding boxes match expected: brush 0.325×0.084×0.083 m, pan 0.240×0.190×0.142 m)
+- `data/taco/urdfs/035/035.urdf` (+ `collision.obj`, 11 COACD parts) — brush, visually verified in MeshLab
+- `data/taco/urdfs/057/057.urdf` (+ `collision.obj`, 32 COACD parts, capped) — pan, visually verified in MeshLab
+- COACD params used (matching OakInk-V2 documented defaults): `--max-convex-hull 32 --seed 1 -mi 2000 -md 5 -t 0.07`
+- Both verified loading in Isaac Gym with `convex_decomposition_from_submeshes=True`, correct rigid body/shape counts, no errors
+- All of `data/taco/` already covered by `.gitignore`
+
+**M2 — TACOData loader for one sequence: in progress.**
+Building a standalone-testable `TACOData` (or `TACORightData`/`TACOLeftData`) for `(brush, brush, pan)/20230919_026`, no factory registration yet. Verification via `__main__` block (shape/dtype assertions) + a matplotlib PNG sanity check of MANO fingertips + object point cloud overlay.
+
+**M3 (not started):** register in `factory.py`, run `mano2dexhand.py` kinematic retargeting, verify fingertip tracking error.
+
+**M4 (not started):** full RL residual policy training on the PoC sequence.
 
 ## Phased plan
 
