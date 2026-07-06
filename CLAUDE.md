@@ -113,6 +113,8 @@ data/taco/
 - **Fixed random seeds** for anything reproducible (COACD may be non-deterministic — that's fine).
 - **Working inside the ManipTrans repo** on the `taco-retargeting` branch. New files (TACOData class, preprocessing scripts) can be added, ideally under a new `taco/` subfolder or clearly named files. Do not modify existing GRAB / OakInk-V2 / FAVOR loaders. Generated data (URDFs, checkpoints, trajectories) must be `.gitignore`d.
 - **Chosen PoC sequence:** `(brush, brush, pan)/20230919_026` — 292 frames, simple geometry, clean single-behavior motion, all frame counts aligned. Triplet = (action, tool, target).
+- **Finger-pose FPS resampling is componentwise linear interpolation on axis-angle values, NOT per-joint slerp** (global wrist orientation and object rotation DO use proper slerp). This is a deliberate simplification on the assumption that adjacent-frame finger rotations are small — flagged in-code. Revisit if retargeting error concentrates in fast finger motions.
+- **`isaacgym` must be imported before `torch`, anywhere in the process.** `main/dataset/__init__.py` auto-imports every file in that directory, including `mano2dexhand.py`, which needs `isaacgym` imported first. Any script touching `main.dataset` AND needing a real `DexHand` instance (for `relative_rotation`/`n_dofs`) must be a standalone entry script with `isaacgym` imported first (see `taco_verify_m2.py`) — cannot be invoked as `-m main.dataset...`. This is a pre-existing repo quirk, not something we introduced.
 
 ## Progress log
 
@@ -124,8 +126,11 @@ data/taco/
 - Both verified loading in Isaac Gym with `convex_decomposition_from_submeshes=True`, correct rigid body/shape counts, no errors
 - All of `data/taco/` already covered by `.gitignore`
 
-**M2 — TACOData loader for one sequence: in progress.**
-Building a standalone-testable `TACOData` (or `TACORightData`/`TACOLeftData`) for `(brush, brush, pan)/20230919_026`, no factory registration yet. Verification via `__main__` block (shape/dtype assertions) + a matplotlib PNG sanity check of MANO fingertips + object point cloud overlay.
+**M2 — TACOData loader for one sequence: COMPLETE** (pending one follow-up check, see below).
+- `main/dataset/taco_dataset_dexhand.py` — `TACODataBase` (mirrors `grab_dataset_dexhand.py`) + `TACORightData`/`TACOLeftData` subclasses. Not yet registered with `ManipDataFactory`.
+- `taco_verify_m2.py` — standalone entry script (see isaacgym import-order gotcha below for why it can't be run as `-m main.dataset...`).
+- **Verified:** `Tf=583` frames (292 @ 30Hz → 120Hz-equivalent → `skip=2`), all fields match the `ManipData` interface (`obj_verts` (1000,3), `obj_trajectory` (583,4,4), `wrist_pos`/`mano_joints` (583,3)×20, `opt_dof_pos` (583,12) matching Inspire's 12 DOF), all `float32` on `cuda:0`.
+- Sanity-check PNG (`data/taco/m2_sanity_check.png`, gitignored) shows plausible hand shape (tight fingertip clusters) at 4 sampled frames. **Follow-up requested:** plot right-hand-to-tool vs. right-hand-to-target distance over the full 583 frames (not just mean) to double-confirm the hand/object assignment below — axis scaling differs per subplot in the snapshot PNG, making visual proximity checks across frames unreliable.
 
 **M3 (not started):** register in `factory.py`, run `mano2dexhand.py` kinematic retargeting, verify fingertip tracking error.
 
@@ -174,14 +179,15 @@ Implication: compute-heavy. Each sequence requires an RL run (parallel envs × t
 
 ## Open questions
 
-**Convention detail to decide during implementation:**
+**Resolved:**
 
-1. **`center_idx = 0` vs `center_idx = None`?** TACO's own loader uses `center_idx=0` (verts/joints centered at wrist before adding `hand_trans`); `grab_dataset_dexhand.py` uses `center_idx=None`. Only changes how translation is composed, not pose geometry. TACOData needs to pick one and be internally consistent. Recommend matching TACO's convention (`center_idx=0`) since our input format follows TACO exactly — safer than translating a translation convention.
+1. **`center_idx = None`** — chosen for structural consistency with `grab_dataset_dexhand.py` and the rest of ManipTrans, deviating from TACO's own `center_idx=0` convention. Confirmed in M2.
+2. **Hand/object assignment for PoC sequence:** right hand → tool (035, brush), left hand → target (057, pan). Verified via mean wrist-to-object distance across the sequence (right-to-tool 0.198m vs. right-to-target 0.351m; left-to-target 0.210m vs. left-to-tool 0.278m). **Follow-up requested:** confirm this holds frame-by-frame, not just on average (see M2 progress log) before trusting it fully for later sequences.
 
-**Non-blocking (handle during implementation):**
+**Non-blocking (handle when scaling beyond PoC):**
 
-2. Per-sequence tool→hand / target→hand assignment (use wrist-distance heuristic; hardcode for PoC).
-3. TACO world-frame axis/up convention (verify visually during first inspection).
+3. TACO world-frame axis/up convention (verify visually during first inspection — done informally via M2 sanity PNG, looks plausible).
+4. General per-sequence tool→hand assignment heuristic (wrist-distance approach validated for this one sequence; confirm it generalizes before batch-processing many sequences).
 
 ## Scope questions (awaiting supervisor input)
 
