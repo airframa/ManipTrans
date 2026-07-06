@@ -11,6 +11,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+isaacgym/
 develop-eggs/
 dist/
 downloads/
@@ -188,4 +189,6 @@ annotator*.py
 make*.py
 
 runs
-runs/*
+runs/*data/taco/urdfs/
+outputs/inspire_trajectories/
+data/taco/*.zip
