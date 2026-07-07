@@ -4,7 +4,10 @@ over the whole sequence to confirm right-to-tool stays below right-to-target
 (and symmetrically for the left hand), rather than relying on per-frame 3D
 scatter plots with independently-scaled axes.
 
-Usage: python taco_distance_check.py
+Must be run from the repo root: all data paths (data/taco/..., data/retargeting/...)
+are resolved relative to CWD, not to this file's location.
+
+Usage (from repo root): python scripts/taco/taco_distance_check.py
 """
 
 from isaacgym import gymapi  # noqa: F401 -- must be first import in the whole process

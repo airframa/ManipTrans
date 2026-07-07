@@ -1,12 +1,12 @@
 """
-Standalone TACO -> ManipTrans loader (M2 proof-of-concept).
+TACO -> ManipTrans loader. Supports a small hardcoded registry of sequences
+(see SEQUENCES below), each with independently-confirmed right=tool/left=target
+hand assignment (wrist-to-object-trajectory distance heuristic; zero or
+near-zero crossovers -- see CLAUDE.md progress log).
 
-Not yet registered with ManipDataFactory (that is M3). Hardcoded to a single
-sequence: (brush, brush, pan)/20230919_026. Right hand holds the tool
-(035, brush); left hand holds the target (057, pan) -- confirmed by a
-wrist-to-object-trajectory distance heuristic (mean dist: right-to-tool
-0.198m vs right-to-target 0.351m; left-to-target 0.210m vs left-to-tool
-0.278m).
+Registered with ManipDataFactory as "taco_rh"/"taco_lh". Index format for
+ManipDataFactory.dataset_type() / mano2dexhand.py's --data_idx: "t0", "t1", ...
+-- an index into SEQUENCES.
 """
 
 import os
@@ -25,6 +25,7 @@ from manotorch.manolayer import ManoLayer
 
 from main.dataset.transform import aa_to_rotmat, rotmat_to_aa
 from .base import ManipData
+from .decorators import register_manipdata
 
 TACO_ROOT = "data/taco"
 
@@ -38,12 +39,24 @@ FINGERTIP_VERTEX_IDS = {
     "thumb": 766,
 }
 
-SEQ_TRIPLET = "(brush, brush, pan)"
-SEQ_NAME = "20230919_026"
-TOOL_ID = "035"
-TARGET_ID = "057"
 NATIVE_FPS = 30
 TARGET_FPS = 120  # matches base.py's hardcoded dt = 1/(120/skip)
+
+# Registry of validated sequences. index -> "t{index}" for ManipDataFactory /
+# mano2dexhand.py's --data_idx. Each entry's right=tool/left=target assignment
+# was confirmed via the wrist-to-object-trajectory distance heuristic before
+# being added here (see CLAUDE.md M2 progress log for entry 0; M3 follow-up
+# session for entries 1-3).
+SEQUENCES = [
+    # 0: original PoC. 292 frames, right-to-tool crossings=0/583 (post-resample).
+    dict(triplet="(brush, brush, pan)", seq_name="20230919_026", tool_id="035", target_id="057"),
+    # 1: hammer/helmet. 85 frames, right-to-tool crossings=0/85, left-to-target crossings=0/85.
+    dict(triplet="(hit, hammer, helmet)", seq_name="20231002_063", tool_id="139", target_id="039"),
+    # 2: spoon/bowl. 108 frames, right-to-tool crossings=0/108, left-to-target crossings=17/108 (some ambiguity).
+    dict(triplet="(put in, spoon, bowl)", seq_name="20231104_179", tool_id="198", target_id="180"),
+    # 3: knife/plate. 106 frames, right-to-tool crossings=0/106, left-to-target crossings=0/106.
+    dict(triplet="(scrape off, knife, plate)", seq_name="20231020_232", tool_id="063", target_id="166"),
+]
 
 
 def _resample_translation(trans: np.ndarray, times_src: np.ndarray, times_dst: np.ndarray) -> np.ndarray:
@@ -99,10 +112,6 @@ class TACODataBase(ManipData):
             **kwargs,
         )
         self.side = side
-        # PoC-specific hardcoded tool/target assignment -- verified via wrist-distance
-        # heuristic, not derivable from filenames alone (see CLAUDE.md open questions).
-        self.obj_id = TOOL_ID if side == "right" else TARGET_ID
-        self.obj_role = "tool" if side == "right" else "target"
 
         self.manolayer = ManoLayer(
             rot_mode="axisang",
@@ -113,16 +122,25 @@ class TACODataBase(ManipData):
             flat_hand_mean=True,
         ).to(device)
 
-        self.data_pathes = [os.path.join(self.data_dir, "Hand_Poses", SEQ_TRIPLET, SEQ_NAME)]
+        self.data_pathes = list(range(len(SEQUENCES)))
 
     def __len__(self):
         return len(self.data_pathes)
 
     @lru_cache(maxsize=None)
     def __getitem__(self, idx):
-        idx = int(idx)
-        hand_dir = self.data_pathes[idx]
-        obj_dir = hand_dir.replace(os.path.join("Hand_Poses", SEQ_TRIPLET), os.path.join("Object_Poses", SEQ_TRIPLET))
+        # index format: "t0", "t1", ... (ManipDataFactory.dataset_type() dispatch prefix)
+        # or a plain int -- both index into SEQUENCES.
+        if isinstance(idx, str) and idx.startswith("t"):
+            idx = int(idx[1:])
+        else:
+            idx = int(idx)
+        seq = SEQUENCES[idx]
+        seq_triplet, seq_name, tool_id, target_id = seq["triplet"], seq["seq_name"], seq["tool_id"], seq["target_id"]
+        obj_id = tool_id if self.side == "right" else target_id
+
+        hand_dir = os.path.join(self.data_dir, "Hand_Poses", seq_triplet, seq_name)
+        obj_dir = os.path.join(self.data_dir, "Object_Poses", seq_triplet, seq_name)
 
         hand_pkl = "right_hand.pkl" if self.side == "right" else "left_hand.pkl"
         shape_pkl = "right_hand_shape.pkl" if self.side == "right" else "left_hand_shape.pkl"
@@ -137,7 +155,7 @@ class TACODataBase(ManipData):
         hand_pose = np.stack([hand_data[k]["hand_pose"].numpy() for k in frame_keys]).astype(np.float32)  # (T, 48)
         hand_trans = np.stack([hand_data[k]["hand_trans"].numpy() for k in frame_keys]).astype(np.float32)  # (T, 3)
 
-        obj_file = f"tool_{TOOL_ID}.npy" if self.side == "right" else f"target_{TARGET_ID}.npy"
+        obj_file = f"tool_{tool_id}.npy" if self.side == "right" else f"target_{target_id}.npy"
         obj_traj_src = np.load(os.path.join(obj_dir, obj_file)).astype(np.float32)  # (T, 4, 4)
         assert obj_traj_src.shape[0] == T, "hand/object frame count mismatch"
 
@@ -207,7 +225,7 @@ class TACODataBase(ManipData):
         obj_trajectory[:, :3, :3] = torch.tensor(obj_rotmat_rs, dtype=torch.float32, device=self.device)
         obj_trajectory[:, :3, 3] = torch.tensor(obj_trans_rs, dtype=torch.float32, device=self.device)
 
-        obj_mesh_path = os.path.join(TACO_ROOT, "object_models_released", f"{self.obj_id}_cm.obj")
+        obj_mesh_path = os.path.join(TACO_ROOT, "object_models_released", f"{obj_id}_cm.obj")
         obj_mesh = trimesh.load(obj_mesh_path, process=False, force="mesh", skip_materials=True)
         obj_mesh_verts_m = (obj_mesh.vertices * 0.01).astype(np.float32)  # cm -> m
 
@@ -218,10 +236,10 @@ class TACODataBase(ManipData):
         rs_verts_obj = self.random_sampling_pc(mesh)
 
         data = {
-            "data_path": f"{SEQ_TRIPLET}/{SEQ_NAME}@{self.side}",
-            "obj_id": self.obj_id,
+            "data_path": f"{seq_triplet}/{seq_name}@{self.side}",
+            "obj_id": obj_id,
             "obj_verts": rs_verts_obj,
-            "obj_urdf_path": os.path.join(TACO_ROOT, "urdfs", self.obj_id, f"{self.obj_id}.urdf"),
+            "obj_urdf_path": os.path.join(TACO_ROOT, "urdfs", obj_id, f"{obj_id}.urdf"),
             "obj_trajectory": obj_trajectory,
             "scene_objs": [],
             "wrist_pos": wrist_pos,
@@ -231,18 +249,20 @@ class TACODataBase(ManipData):
 
         self.process_data(data, idx, rs_verts_obj)
 
-        opt_path = f"data/retargeting/taco/mano2{str(self.dexhand)}/{SEQ_NAME}@{self.side}.pkl"
+        opt_path = f"data/retargeting/taco/mano2{str(self.dexhand)}/{seq_name}@{self.side}.pkl"
         self.load_retargeted_data(data, opt_path)
 
         return data
 
 
+@register_manipdata("taco_rh")
 class TACORightData(TACODataBase):
     def __init__(self, **kwargs):
         kwargs.pop("side", None)
         super().__init__(side="right", **kwargs)
 
 
+@register_manipdata("taco_lh")
 class TACOLeftData(TACODataBase):
     def __init__(self, **kwargs):
         kwargs.pop("side", None)
