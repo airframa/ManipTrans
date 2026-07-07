@@ -171,11 +171,37 @@ data/taco/
 - Reward: weighted sum of exponential tracking terms (wrist pos/rot, per-finger-tip position with per-finger weights, proximal/intermediate joints, object pos/rot, velocities, fingertip contact force, power penalties) + a tightening schedule that progressively shrinks tolerance.
 - Estimated cost (from a real prior identical-config run on this hardware, `runs/cross_20aed@0_inspire__06-30-10-25-22/`, OakInk-V2 20aed@0, side=BiH, num_envs=4096): **~15.1 sec/epoch, ~4–4.5 hours wall-clock** for early_stop_epochs=1000, single GPU. That reference run converged to ~0.96–0.98 success rate, reward plateaued ~epoch 700+. GPU memory unmeasured historically — recommend watching `nvidia-smi` for the first few minutes of the real run.
 
-**Concerns raised before launch (supervisor), under investigation:**
-1. **Coordinate frame consistency:** is TACO's world frame (origin, up-axis, handedness) actually consistent with what `mano2dexhand.py` assumes / what GRAB already satisfies? Previously logged as "looks plausible, no issue found" (soft check only) — now being rigorously verified with a direct frame comparison between GRAB and TACO's first-frame poses.
-2. **GRAB baseline too thin:** our only GRAB comparison (sequence 102) is Tf=60 — much shorter than our TACO sequences (169–583 frames). Running at least one longer GRAB sequence (checking `data/grab_demo/grab.zip` for additional sequences first) before trusting the GRAB-vs-TACO comparison.
+**Concerns raised before launch (supervisor) — both investigated with evidence:**
 
-**M4 launch is on hold pending resolution of both.**
+1. **Coordinate frame consistency — RESOLVED for M3, ACTION NEEDED for M4.**
+   - `grab_dataset_dexhand.py` bakes a hand-tuned `transf_offset` into `mujoco2gym_transf` (axis permutation + translation, "borrowed from QuasiSim"). `taco_dataset_dexhand.py` (like `oakink2_dataset_dexhand_rh.py`) applies none — identity, same as OakInk-V2, so TACO isn't uniquely un-corrected here.
+   - **Real, measurable discrepancy found:** TACO sits ~0.3m lower (wrist) / ~0.05–0.08m lower (object) than GRAB relative to the nominal table height (0.415m). Confirmed via `scripts/taco/check_coord_frames.py`.
+   - **Proven NOT to affect M3's tracking-error numbers:** the table transform is a single rigid 4×4 matrix applied identically to wrist, object, and mano_joints (verified in `base.py`'s `process_data()`) — rigid transforms preserve all relative distances, and the tracking-error metric only measures relative hand-to-target geometry. Additionally, `Mano2Dexhand.__init__` disables gravity on both assets and the retargeting-only scene has no table collision body — so the offset can't manifest as a physics artifact during M3 either. Handedness/rotation mismatch (the more dangerous kind) is independently ruled out by the labeled overlay video showing correct, natural-looking grasps throughout.
+   - **Action needed before M4:** `dexhandmanip_bih.py` (the real RL training env) DOES have a physical table + gravity enabled at the same z=0.415 reference. Feeding it TACO's uncorrected data risks spawning the object/hand clipped into or floating above the table. **Must derive a TACO-specific `transf_offset` (mirroring GRAB's pattern) before launching M4** — in progress.
+
+2. **GRAB baseline thinness — RESOLVED, original conclusion reinforced.**
+   - `data/grab_demo/grab.zip` contains only sequence 102, but a second, unused 108-frame variant (`102_sv_dict_st_0_ed_108.npy`) was already on disk (no new data needed).
+   - Added `main/dataset/grab_dataset_dexhand_long.py` (new file, duplicates loading logic rather than modifying the original — per working-style convention), registered as `grabdemo2_rh` / index prefix `"h"`.
+   - **Updated comparison table (iter=5000):**
+
+| Sequence | side | Tf | mean (cm) | max (cm) | worst frame |
+|---|---|---|---|---|---|
+| brush/pan 20230919_026 (PoC) | right (tool) | 583 | 1.32 | 21.43 | 564 |
+| | left (target) | 583 | 2.19 | 9.66 | 338 |
+| hammer/helmet 20231002_063 | right (tool) | 169 | 1.64 | 9.34 | 92 |
+| | left (target) | 169 | 0.92 | 1.86 | 79 |
+| spoon/bowl 20231104_179 | right (tool) | 215 | 0.58 | 3.09 | 26 |
+| | left (target) | 215 | 1.15 | 13.86 | 210 |
+| knife/plate 20231020_232 | right (tool) | 211 | 0.50 | 2.51 | 187 |
+| | left (target) | 211 | 1.74 | 14.08 | 112 |
+| GRAB 102 (60f, original) | right | 60 | 0.71 | 1.64 | 13 |
+| **GRAB 102 (108f, new)** | right | 108 | **0.80** | **1.92** | 96 |
+
+   - Even at ~2× the length, GRAB still shows no spike (max stays close to mean) — the "GRAB clean, TACO has isolated hard frames" pattern holds with a thicker baseline. Confirmed visually via `outputs/grab_h0_retargeting_preview_labeled.mp4`.
+
+3. **Note: brush/pan (our PoC) is one of the harder TACO sequences tested**, not a typical/easy case — worst or near-worst on 3 of 4 error columns (right mean, right max, left mean). Worth keeping in mind when characterizing PoC results — it was chosen for clean geometry/frame alignment, not for being an easy case.
+
+**M4 launch still on hold — pending the TACO-specific `transf_offset` fix + a lightweight physics sanity check in the real training env (gravity/table on, no full RL) before committing to the multi-hour training run.**
 
 ## Phased plan
 
