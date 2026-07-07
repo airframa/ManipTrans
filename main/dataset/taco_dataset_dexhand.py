@@ -86,6 +86,30 @@ def _lerp_componentwise(x: np.ndarray, times_src: np.ndarray, times_dst: np.ndar
     return np.stack([np.interp(times_dst, times_src, x[:, d]) for d in range(D)], axis=-1).astype(np.float32)
 
 
+# TACO-specific table-height correction (mirrors grab_dataset_dexhand.py's transf_offset
+# pattern -- a translation baked into self.mujoco2gym_transf, applied in process_data()
+# before Mano2Dexhand ever sees the data). Rotation is left as identity: the M3
+# coordinate-frame investigation found TACO's raw axis/handedness convention already
+# matches what Mano2Dexhand.fitting()'s table transform expects (same as OakInk-V2,
+# no correction needed there either) -- only the absolute height was off.
+#
+# Mano2Dexhand's table transform maps raw Y -> final Z (verified empirically), so a
+# translation along raw Y is what shifts height in the frame the optimizer sees, exactly
+# how GRAB's own transf_offset only touches its Y-component ([0.0, 0.018, 0.0]).
+#
+# Derived from data (scripts/taco/check_coord_frames.py + M4 pre-flight session): over
+# the full PoC sequence, the tool (brush) object's z-height (post table-transform, no
+# correction) ranges min=0.2637 to max=0.3914, and the target (pan) ranges min=0.2963 to
+# max=0.3906. Table surface sits at z=0.415 (table_pos_z=0.4 + table_half_height=0.015,
+# both mano2dexhand.py and dexhandmanip_bih.py). Taking each object's resting-height
+# (trajectory minimum, i.e. when it's presumably on/near the table) and averaging the
+# two deltas needed to bring that minimum up to the table surface:
+#   delta_tool   = 0.415 - 0.2637 = 0.1513
+#   delta_target = 0.415 - 0.2963 = 0.1187
+#   TACO_HEIGHT_DELTA = mean(0.1513, 0.1187) = 0.135
+TACO_HEIGHT_DELTA = 0.135
+
+
 class TACODataBase(ManipData):
     def __init__(
         self,
@@ -121,6 +145,14 @@ class TACODataBase(ManipData):
             use_pca=False,
             flat_hand_mean=True,
         ).to(device)
+
+        # table-height correction -- see TACO_HEIGHT_DELTA derivation above.
+        # Same pattern as grab_dataset_dexhand.py's transf_offset; shared identically
+        # across both hands (TACORightData/TACOLeftData) since it's one physical scene.
+        transf_offset = np.eye(4)
+        transf_offset[:3, 3] = np.array([0.0, TACO_HEIGHT_DELTA, 0.0])
+        self.transf_offset = torch.tensor(transf_offset, dtype=torch.float32, device=mujoco2gym_transf.device)
+        self.mujoco2gym_transf = mujoco2gym_transf @ self.transf_offset
 
         self.data_pathes = list(range(len(SEQUENCES)))
 

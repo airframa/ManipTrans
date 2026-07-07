@@ -27,6 +27,7 @@ import maniptrans_envs.lib.envs.dexhands  # noqa: F401 -- triggers hand auto-reg
 
 from main.dataset.taco_dataset_dexhand import TACORightData, TACOLeftData, SEQUENCES
 from main.dataset.grab_dataset_dexhand import GrabDemoDexHand
+from main.dataset.grab_dataset_dexhand_long import GrabDemoLongDexHand
 from main.dataset.transform import aa_to_rotmat
 
 TIP_NAMES = ["thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip"]
@@ -108,6 +109,15 @@ def run():
     pkl_path_g = f"data/retargeting/grab_demo/mano2{str(dexhand_rh)}/102_sv_dict.pkl"
     m = compute_metrics(data_g, dexhand_rh, pkl_path_g, table_transf, device)
     m["dataset"] = "grab[g0] 102_sv_dict"
+    m["side"] = "right"
+    results.append(m)
+
+    # --- GRAB baseline #2: same underlying motion, full 108-frame length ---
+    fdata_g2 = GrabDemoLongDexHand(mujoco2gym_transf=identity, device=device, dexhand=dexhand_rh)
+    data_g2 = fdata_g2["h0"]
+    pkl_path_g2 = f"data/retargeting/grab_demo_long/mano2{str(dexhand_rh)}/102_sv_dict_st_0_ed_108.pkl"
+    m = compute_metrics(data_g2, dexhand_rh, pkl_path_g2, table_transf, device)
+    m["dataset"] = "grab[h0] 102_sv_dict_st_0_ed_108"
     m["side"] = "right"
     results.append(m)
 

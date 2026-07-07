@@ -507,6 +507,8 @@ if __name__ == "__main__":
             dump_path = f"data/retargeting/grab_demo/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1].replace('.npy', '.pkl')}"
         elif dataset_type == "taco":
             dump_path = f"data/retargeting/taco/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1]}.pkl"
+        elif dataset_type == "grabdemo2":
+            dump_path = f"data/retargeting/grab_demo_long/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1].replace('.npy', '.pkl')}"
         elif dataset_type == "oakink2_mirrored":
             dump_path = f"data/retargeting/OakInk-v2-mirrored/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1].replace('.pkl', f'@{idx[-1]}.pkl')}"
         elif dataset_type == "favor_mirrored":

@@ -48,6 +48,8 @@ class ManipDataFactory:
             dtype = "visionpro"
         elif type(index) == str and index.startswith("t"):
             dtype = "taco"
+        elif type(index) == str and index.startswith("h"):
+            dtype = "grabdemo2"
         else:
             dtype = "favor"
 
