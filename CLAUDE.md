@@ -154,7 +154,28 @@ data/taco/
 - Worst frames cluster near sequence end in 3/4 cases (tool release/regrasp motion, consistent with the M2 distance anomaly) — but NOT universally: knife/plate's worst frame (112/211) is mid-sequence, indicating some sequences have hard grasp transitions mid-motion too.
 - **Accepted as baseline.** These are genuine kinematic infeasibilities that the RL residual policy is designed to absorb — supported by same-pipeline evidence (GRAB baseline), not just assumption. Proceeding to M4 on the original PoC sequence.
 
-**M4 (not started):** full RL residual policy training on the PoC sequence `(brush, brush, pan)/20230919_026`.
+**M4 — planning complete, NOT launched. Two methodological concerns raised by supervisor, under investigation before launch.**
+
+**M4 plan (validated, ready once concerns below are resolved):**
+- Entry point: `main/rl/train.py` (Hydra), task config `main/cfg/task/ResDexHand.yaml`, RL config `main/cfg/rl_train/ResDexHandPPO.yaml`.
+- Proposed command:
+  ```
+  python main/rl/train.py task=ResDexHand dexhand=inspire side=BiH headless=true num_envs=4096 \
+    learning_rate=2e-4 test=false randomStateInit=true dataIndices=[t0] \
+    rh_base_model_checkpoint=assets/imitator_ckp/imitator_rh_inspire.pth \
+    lh_base_model_checkpoint=assets/imitator_ckp/imitator_lh_inspire.pth \
+    early_stop_epochs=1000 actionsMovingAverage=0.4 experiment=cross_taco_t0_inspire
+  ```
+- **Bug caught: README/config default checkpoint paths are wrong.** Both say `assets/imitator_rh_inspire.pth` / `assets/imitator_lh_inspire.pth`, but the real files live at `assets/imitator_ckp/imitator_rh_inspire.pth` / `assets/imitator_ckp/imitator_lh_inspire.pth`. Must override explicitly or training fails at startup.
+- Key hyperparams: `num_envs=4096`, `horizon_length=32`, `minibatch_size=1024`, `mini_epochs=5`, `gamma=0.99`, `learning_rate=2e-4`, `early_stop_epochs=1000` (minimum-epoch floor before a slope-based plateau check can trigger, not a patience counter).
+- Reward: weighted sum of exponential tracking terms (wrist pos/rot, per-finger-tip position with per-finger weights, proximal/intermediate joints, object pos/rot, velocities, fingertip contact force, power penalties) + a tightening schedule that progressively shrinks tolerance.
+- Estimated cost (from a real prior identical-config run on this hardware, `runs/cross_20aed@0_inspire__06-30-10-25-22/`, OakInk-V2 20aed@0, side=BiH, num_envs=4096): **~15.1 sec/epoch, ~4–4.5 hours wall-clock** for early_stop_epochs=1000, single GPU. That reference run converged to ~0.96–0.98 success rate, reward plateaued ~epoch 700+. GPU memory unmeasured historically — recommend watching `nvidia-smi` for the first few minutes of the real run.
+
+**Concerns raised before launch (supervisor), under investigation:**
+1. **Coordinate frame consistency:** is TACO's world frame (origin, up-axis, handedness) actually consistent with what `mano2dexhand.py` assumes / what GRAB already satisfies? Previously logged as "looks plausible, no issue found" (soft check only) — now being rigorously verified with a direct frame comparison between GRAB and TACO's first-frame poses.
+2. **GRAB baseline too thin:** our only GRAB comparison (sequence 102) is Tf=60 — much shorter than our TACO sequences (169–583 frames). Running at least one longer GRAB sequence (checking `data/grab_demo/grab.zip` for additional sequences first) before trusting the GRAB-vs-TACO comparison.
+
+**M4 launch is on hold pending resolution of both.**
 
 ## Phased plan
 
