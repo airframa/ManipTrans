@@ -128,12 +128,13 @@ data/taco/
 
 **M2 — TACOData loader for one sequence: COMPLETE and fully verified.**
 - `main/dataset/taco_dataset_dexhand.py` — `TACODataBase` (mirrors `grab_dataset_dexhand.py`) + `TACORightData`/`TACOLeftData` subclasses, plus `run_verification()` and `run_distance_check()`.
-- `taco_verify_m2.py`, `taco_distance_check.py` — standalone entry scripts (isaacgym import-order gotcha applies, see below).
+- `scripts/taco/taco_verify_m2.py`, `scripts/taco/taco_distance_check.py` — standalone entry scripts (isaacgym import-order gotcha applies, see below). Must be run from repo root (e.g. `python scripts/taco/taco_verify_m2.py`).
 - **Verified:** `Tf=583` frames (292 @ 30Hz → 120Hz-equivalent → `skip=2`), all fields match the `ManipData` interface. Hand/object assignment confirmed with zero crossovers across all 583 frames: right hand → tool (brush), left hand → target (pan).
 - **Note carried into M3:** frames ~500–583 show a sharp increase in right-wrist-to-object distance — plausibly the hand releasing the brush at the end of the motion.
 
 **M3 — Register + kinematic retargeting: COMPLETE, validated across multiple sequences + GRAB baseline.**
 - Registered `taco_rh`/`taco_lh` in `factory.py`; `taco_dataset_dexhand.py` generalized to a `SEQUENCES` registry (index 0 = original PoC, regression-checked unchanged behavior).
+- All verification/comparison scripts (`taco_verify_m2.py`, `taco_verify_m3.py`, `taco_distance_check.py`, `compare_verify_m3.py`) live under `scripts/taco/` — moved out of repo root for tidiness. All are CWD-relative (no `__file__` path tricks) — must be run from the repo root, e.g. `python scripts/taco/taco_verify_m3.py`.
 - Convergence check (iter 2000 vs. 5000, PoC sequence): worst frames unchanged, only marginal (~10-20%) error reduction — confirms spikes are genuine kinematic infeasibility, not under-optimization.
 - **Multi-sequence validation (iter=5000, all runs):**
 
