@@ -154,7 +154,7 @@ data/taco/
 - Worst frames cluster near sequence end in 3/4 cases (tool release/regrasp motion, consistent with the M2 distance anomaly) — but NOT universally: knife/plate's worst frame (112/211) is mid-sequence, indicating some sequences have hard grasp transitions mid-motion too.
 - **Accepted as baseline.** These are genuine kinematic infeasibilities that the RL residual policy is designed to absorb — supported by same-pipeline evidence (GRAB baseline), not just assumption. Proceeding to M4 on the original PoC sequence.
 
-**M4 — planning complete, NOT launched. Two methodological concerns raised by supervisor, under investigation before launch.**
+**M4 — planning complete. All pre-flight concerns resolved. Cleared to launch, pending final go-ahead.**
 
 **M4 plan (validated, ready once concerns below are resolved):**
 - Entry point: `main/rl/train.py` (Hydra), task config `main/cfg/task/ResDexHand.yaml`, RL config `main/cfg/rl_train/ResDexHandPPO.yaml`.
@@ -201,7 +201,14 @@ data/taco/
 
 3. **Note: brush/pan (our PoC) is one of the harder TACO sequences tested**, not a typical/easy case — worst or near-worst on 3 of 4 error columns (right mean, right max, left mean). Worth keeping in mind when characterizing PoC results — it was chosen for clean geometry/frame alignment, not for being an easy case.
 
-**M4 launch still on hold — pending the TACO-specific `transf_offset` fix + a lightweight physics sanity check in the real training env (gravity/table on, no full RL) before committing to the multi-hour training run.**
+**Table-offset fix: COMPLETE and validated. M4 pre-flight cleared.**
+- Derived `TACO_HEIGHT_DELTA = 0.135` (Y-translation only, mirroring GRAB's pattern — rotation/handedness already confirmed correct) as the average of each object's needed correction (tool 0.1513, target 0.1187) to bring trajectory-minimum heights to the table surface (z=0.415). Added to `TACODataBase.__init__` following GRAB's `transf_offset` pattern.
+- **Known approximation, not a perfect fix:** one shared constant leaves a small residual ~1.6cm asymmetric mismatch per object (tool ends ~1.6cm below table surface, target ~1.6cm above) rather than exact per-object alignment. Likely negligible (comparable to GRAB's own baseline error, 0.7–1.9cm) — revisit with per-object deltas if M4 training shows height/contact-specific oddities.
+- **No re-optimization needed:** proved algebraically (pure translation → constant shift, exactly compensated in `opt_wrist_pos`/`opt_joints_pos`; `opt_wrist_rot`/`opt_dof_pos` frame-invariant, unchanged) and empirically (`compare_verify_m3.py` re-run post-shift gives numbers identical to pre-shift). Shifted all 8 existing TACO retargeting pkls in place via `scripts/taco/shift_taco_retargeting_pkls.py`.
+- **Physics sanity check passed:** spawned the real `DexHandManipBiHEnv` (gravity on, real table collision, `dataIndices=[t0]`, corrected data), reset-state z-heights sane (hands 0.25/0.28, table 0.40, objects 0.50/0.53 — no interpenetration). `outputs/m4_preflight_physics_check.png`/`.mp4`.
+- **Unrelated pre-existing bug found:** `dexhandmanip_bih.py`'s `pack_data()` calls `.squeeze()`, collapsing the batch dim when `num_envs=1` — breaks for ANY dataset run single-env, not TACO-specific. Not an issue at our planned `num_envs=4096`, but worth remembering for future minimal-env debugging.
+
+**M4 is cleared to launch**, pending final go-ahead on the command in the plan above.
 
 ## Phased plan
 
