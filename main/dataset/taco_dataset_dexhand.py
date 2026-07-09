@@ -137,10 +137,19 @@ class TACODataBase(ManipData):
         )
         self.side = side
 
+        # center_idx=0 (NOT None): TACO's hand_trans is defined as the wrist's world
+        # position, matching TACO's own hand_pose_loader.py convention (which recenters
+        # the wrist to the origin before adding trans). center_idx=None left manotorch's
+        # get_rotation_center() offset (~10cm, shape-dependent) uncompensated, displacing
+        # every joint/vertex ~10cm and inflating tips_distance 5-10x -- root-caused during
+        # M4 debugging (see CLAUDE.md). grab_dataset_dexhand.py's center_idx=None is not
+        # a counterexample: that loader never runs the MANO forward pass for vertices (it
+        # loads precomputed absolute rhand_verts and only uses th_J_regressor, which
+        # center_idx doesn't affect), so its setting was never actually exercised.
         self.manolayer = ManoLayer(
             rot_mode="axisang",
             side=side,
-            center_idx=None,
+            center_idx=0,
             mano_assets_root="data/mano_v1_2",
             use_pca=False,
             flat_hand_mean=True,

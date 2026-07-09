@@ -12,12 +12,15 @@ Mano2Dexhand.__init__, not re-derived per sequence) and compare.
 Must be run from the repo root: all data paths (data/taco/..., data/retargeting/...)
 are resolved relative to CWD, not to this file's location.
 
-Usage (from repo root): python scripts/taco/taco_verify_m3.py
+Usage (from repo root): python scripts/taco/taco_verify_m3.py [seq_idx] [tag]
+  seq_idx: index into taco_dataset_dexhand.SEQUENCES (default 0)
+  tag: short name used in output filenames (default derived from seq_idx)
 """
 
 from isaacgym import gymapi  # noqa: F401 -- must be first import in the whole process
 
 import pickle
+import sys
 
 import numpy as np
 import torch
@@ -25,10 +28,14 @@ import torch
 from maniptrans_envs.lib.envs.dexhands.factory import DexHandFactory
 import maniptrans_envs.lib.envs.dexhands  # noqa: F401 -- triggers hand auto-registration
 
-from main.dataset.taco_dataset_dexhand import TACORightData, TACOLeftData
+from main.dataset.taco_dataset_dexhand import TACORightData, TACOLeftData, SEQUENCES
 from main.dataset.transform import aa_to_rotmat
 
 TIP_NAMES = ["thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip"]
+
+SEQ_IDX = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+SEQ_NAME = SEQUENCES[SEQ_IDX]["seq_name"]
+TAG = sys.argv[2] if len(sys.argv) > 2 else f"t{SEQ_IDX}"
 
 
 def build_table_transf(device):
@@ -60,14 +67,14 @@ def run():
     fdata_rh = TACORightData(mujoco2gym_transf=mujoco2gym_transf_identity, device=device, dexhand=dexhand_rh)
     fdata_lh = TACOLeftData(mujoco2gym_transf=mujoco2gym_transf_identity, device=device, dexhand=dexhand_lh)
 
-    data_rh = fdata_rh["t0"]
-    data_lh = fdata_lh["t0"]
+    data_rh = fdata_rh[f"t{SEQ_IDX}"]
+    data_lh = fdata_lh[f"t{SEQ_IDX}"]
 
     table_transf = build_table_transf(device)
 
     results = {}
     for side, data, dexhand in [("right", data_rh, dexhand_rh), ("left", data_lh, dexhand_lh)]:
-        pkl_path = f"data/retargeting/taco/mano2{str(dexhand)}/20230919_026@{side}.pkl"
+        pkl_path = f"data/retargeting/taco/mano2{str(dexhand)}/{SEQ_NAME}@{side}.pkl"
         with open(pkl_path, "rb") as f:
             opt = pickle.load(f)
         opt_joints_pos = torch.tensor(opt["opt_joints_pos"], device=device, dtype=torch.float32)  # (Tf, n_body, 3)
@@ -119,12 +126,13 @@ def run():
     plt.axhline(1.0, color="black", linestyle=":", label="1cm target")
     plt.xlabel("frame index")
     plt.ylabel("error (cm)")
-    plt.title("M3: kinematic retargeting fingertip tracking error (mean across 5 tips)")
+    plt.title(f"M3 [{TAG}]: kinematic retargeting fingertip tracking error (mean across 5 tips)")
     plt.legend()
     plt.grid(alpha=0.3)
     plt.tight_layout()
-    plt.savefig("data/taco/m3_tracking_error.png", dpi=150)
-    print("Saved data/taco/m3_tracking_error.png")
+    out_err_path = f"outputs/m3_{TAG}_tracking_error.png"
+    plt.savefig(out_err_path, dpi=150)
+    print(f"Saved {out_err_path}")
 
     # --- overlay scatter: MANO fingertips (targets) vs retargeted Inspire fingertips ---
     n_show = 4
@@ -157,8 +165,9 @@ def run():
                 ax.legend(fontsize=6, loc="upper left")
 
     plt.tight_layout()
-    plt.savefig("data/taco/m3_overlay.png", dpi=150)
-    print("Saved data/taco/m3_overlay.png")
+    out_overlay_path = f"outputs/m3_{TAG}_overlay.png"
+    plt.savefig(out_overlay_path, dpi=150)
+    print(f"Saved {out_overlay_path}")
 
     return results
 

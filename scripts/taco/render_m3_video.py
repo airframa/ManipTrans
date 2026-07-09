@@ -25,7 +25,9 @@ Reused from the existing pipeline rather than built from scratch:
 Must be run from the repo root: all data paths (data/taco/..., data/retargeting/...,
 outputs/...) are resolved relative to CWD, not to this file's location.
 
-Usage (from repo root): python scripts/taco/render_m3_video.py
+Usage (from repo root): python scripts/taco/render_m3_video.py [seq_idx] [tag]
+  seq_idx: index into taco_dataset_dexhand.SEQUENCES (default 0)
+  tag: short name used in output filenames (default derived from seq_idx)
 """
 
 from isaacgym import gymapi, gymtorch  # noqa: F401 -- must be first import in the whole process
@@ -33,6 +35,7 @@ from isaacgym import gymapi, gymtorch  # noqa: F401 -- must be first import in t
 import math
 import os
 import pickle
+import sys
 
 import cv2
 import imageio
@@ -42,12 +45,16 @@ import torch
 from maniptrans_envs.lib.envs.dexhands.factory import DexHandFactory
 import maniptrans_envs.lib.envs.dexhands  # noqa: F401 -- triggers hand auto-registration
 
-from main.dataset.taco_dataset_dexhand import TACORightData, TACOLeftData
+from main.dataset.taco_dataset_dexhand import TACORightData, TACOLeftData, SEQUENCES
 from main.dataset.transform import aa_to_rotmat, aa_to_quat
 
-SEQ_NAME = "20230919_026"
-OUT_PATH = "outputs/m3_retargeting_preview.mp4"
-OUT_PATH_LABELED = "outputs/m3_retargeting_preview_labeled.mp4"
+SEQ_IDX = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+SEQ_NAME = SEQUENCES[SEQ_IDX]["seq_name"]
+_triplet_parts = [p.strip() for p in SEQUENCES[SEQ_IDX]["triplet"].strip("()").split(",")]
+TOOL_NAME, TARGET_NAME = _triplet_parts[1], _triplet_parts[2]  # triplet = (action, tool, target)
+TAG = sys.argv[2] if len(sys.argv) > 2 else f"t{SEQ_IDX}"
+OUT_PATH = f"outputs/m3_{TAG}_preview.mp4"
+OUT_PATH_LABELED = f"outputs/m3_{TAG}_preview_labeled.mp4"
 FPS = 60  # matches the effective 60Hz (skip=2) rate our retargeted data is at
 
 # Same fixed camera used for the bimanual record=True view (dexhandmanip_bih.py's
@@ -144,8 +151,8 @@ def main():
     # (untransformed), matching what taco_verify_m3.py already validated
     fdata_rh = TACORightData(mujoco2gym_transf=identity, device=device, dexhand=dexhand_rh)
     fdata_lh = TACOLeftData(mujoco2gym_transf=identity, device=device, dexhand=dexhand_lh)
-    data_rh = fdata_rh["t0"]
-    data_lh = fdata_lh["t0"]
+    data_rh = fdata_rh[f"t{SEQ_IDX}"]
+    data_lh = fdata_lh[f"t{SEQ_IDX}"]
 
     table_transf = build_table_transf(device)
 
@@ -287,9 +294,9 @@ def main():
         # so cv2 color tuples here are (R, G, B), not cv2's usual BGR.
         RED = (255, 0, 0)
         GREEN = (0, 255, 0)
-        cv2.putText(labeled, "RIGHT HAND (tool/brush)", (rh_px[0] - 90, rh_px[1] - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, RED, 2, cv2.LINE_AA)
+        cv2.putText(labeled, f"RIGHT HAND (tool/{TOOL_NAME})", (rh_px[0] - 90, rh_px[1] - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, RED, 2, cv2.LINE_AA)
         cv2.circle(labeled, rh_px, 5, RED, -1)
-        cv2.putText(labeled, "LEFT HAND (target/pan)", (lh_px[0] - 90, lh_px[1] - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, GREEN, 2, cv2.LINE_AA)
+        cv2.putText(labeled, f"LEFT HAND (target/{TARGET_NAME})", (lh_px[0] - 90, lh_px[1] - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, GREEN, 2, cv2.LINE_AA)
         cv2.circle(labeled, lh_px, 5, GREEN, -1)
         frames_labeled.append(labeled)
 
