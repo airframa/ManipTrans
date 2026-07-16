@@ -41,6 +41,21 @@ env:
   tightenFactor: 0.7 # 1.0 means no tightening restriction
   tightenSteps: 3200
 
+  # Reward-coefficient curriculum for the object-pos/object-rot exponential reward terms
+  # (torch.exp(-coef * diff)). Decoupled from tightenMethod/tightenFactor/tightenSteps above,
+  # which only gate the failed_execute termination threshold, not the reward's steepness --
+  # so datasets whose starting tracking error is much larger than OakInk-V2/GRAB's (e.g. TACO,
+  # due to looser kinematic retargeting) can saturate this reward to ~0 from the first steps of
+  # every episode, starving PPO of gradient before the residual ever gets a chance to learn.
+  # Same exp_decay shape/timescale as tightenSteps so it relaxes back to the current
+  # OakInk-V2-validated coefficients (objPosRewardCoefTight/objRotRewardCoefTight) as training
+  # matures. Set loose == tight to fully disable (reproduces old hardcoded -80/-3 behavior).
+  objPosRewardCoefLoose: 80.0
+  objPosRewardCoefTight: 80.0
+  objRotRewardCoefLoose: 3.0
+  objRotRewardCoefTight: 3.0
+  rewardCoefTightenSteps: 3200
+
   actionScale: 1.0
   useQuatRot: false
 

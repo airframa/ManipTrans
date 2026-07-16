@@ -190,5 +190,5 @@ make*.py
 
 runs
 runs/*data/taco/urdfs/
-outputs/inspire_trajectories/
+outputs/
 data/taco/*.zip

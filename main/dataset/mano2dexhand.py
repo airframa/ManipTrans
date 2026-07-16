@@ -11,11 +11,14 @@ logging.getLogger("gymutil").setLevel(logging.CRITICAL)
 import numpy as np
 import pytorch_kinematics as pk
 import torch
+import torch.nn.functional as F
+import trimesh
 from termcolor import cprint
 
 from main.dataset.factory import ManipDataFactory
 from main.dataset.transform import (
     aa_to_quat,
+    aa_to_rot6d,
     aa_to_rotmat,
     quat_to_rotmat,
     rot6d_to_aa,
@@ -26,6 +29,7 @@ from main.dataset.transform import (
     rotmat_to_rot6d,
 )
 from maniptrans_envs.lib.envs.dexhands.factory import DexHandFactory
+from main.dataset.collision_sdf import load_or_build_object_sdf, query_sdf, sample_link_points
 
 
 def pack_data(data, dexhand):
@@ -291,6 +295,38 @@ class Mano2Dexhand:
 
         self.gym.prepare_sim(self.sim)
 
+        # --- collision-penetration term setup (opt-in via fitting()'s collision_weight; see
+        # scripts/taco/build_and_validate_sdf.py for the SDF design/validation this reuses).
+        # Only wired up for TACO's urdfs/<id>/<id>.urdf layout -- inert no-op for GRAB/OakInk-V2/
+        # FAVOR objects, whose URDFs live elsewhere and were never measured for this.
+        self.obj_urdf_path = obj_urdf_path
+        self._taco_obj_id = None
+        norm_path = os.path.normpath(obj_urdf_path)
+        parts = norm_path.split(os.sep)
+        if "taco" in parts and "urdfs" in parts:
+            self._taco_obj_id = parts[parts.index("urdfs") + 1]
+        side_letter = self.dexhand.body_names[0][0]  # "R" or "L"
+        assert side_letter in ("R", "L"), f"unexpected body_name prefix: {self.dexhand.body_names[0]}"
+        self._collision_side_letter = side_letter
+        inspire_root = os.path.split(self.dexhand.urdf_path)[0]
+        self._collision_link_local_points = sample_link_points(
+            inspire_root, side_letter, n_points_per_link=25, device=self.sim_device
+        )
+        # NOTE: dexhand.to_hand() is NOT usable here -- it's a lossy one-to-many mapping
+        # (hand2dex_mapping["thumb_proximal"] = ["thumb_proximal", "thumb_proximal_base"], both
+        # R_/L_-prefixed) so both "R_thumb_proximal" and "R_thumb_proximal_base" reverse-map to
+        # the SAME generic key "thumb_proximal", and "R_hand_base_link" maps to "wrist", not
+        # "hand_base_link". Strip the fixed 2-char R_/L_ prefix directly instead, which matches
+        # collision_sdf.COLLISION_LINK_STL's keys exactly and keeps every link distinct.
+        self._collision_link_body_names = [
+            k for k in self.dexhand.body_names if k[2:] in self._collision_link_local_points
+        ]
+        assert len(self._collision_link_body_names) == len(self._collision_link_local_points), (
+            f"expected all {len(self._collision_link_local_points)} collision links to be found in "
+            f"dexhand.body_names, got {len(self._collision_link_body_names)}: {self._collision_link_body_names}"
+        )
+        self._obj_sdf = None  # lazily built in fitting(), which knows the target grasp region
+
     def set_force_vis(self, env_ptr, part_k, has_force):
         self.gym.set_rigid_body_color(
             env_ptr,
@@ -308,7 +344,22 @@ class Mano2Dexhand:
             ),
         )
 
-    def fitting(self, max_iter, obj_trajectory, target_wrist_pos, target_wrist_rot, target_mano_joints):
+    def fitting(
+        self,
+        max_iter,
+        obj_trajectory,
+        target_wrist_pos,
+        target_wrist_rot,
+        target_mano_joints,
+        collision_weight=0.0,
+        tracking_weight_scale=1.0,
+        init_wrist_pos=None,
+        init_wrist_rot=None,
+        init_dof_pos=None,
+        checkpoint_path=None,
+        checkpoint_every=200,
+        resume=False,
+    ):
 
         assert target_mano_joints.shape[0] == self.num_envs
         target_wrist_pos = (self.mujoco2gym_transf[:3, :3] @ target_wrist_pos.T).T + self.mujoco2gym_transf[:3, 3]
@@ -324,17 +375,41 @@ class Mano2Dexhand:
         offset = middle_pos - obj_pos
         offset = offset / torch.norm(offset, dim=-1, keepdim=True) * 0.2
 
+        if collision_weight > 0:
+            assert self._taco_obj_id is not None, (
+                f"collision_weight>0 requested but {self.obj_urdf_path} isn't a recognized TACO "
+                "urdfs/<id>/<id>.urdf object -- the SDF collision term is only wired up for TACO."
+            )
+            # Always the FULL-OBJECT grid, not a local/narrow-band grid: fitting() optimizes ALL
+            # frames of the sequence simultaneously (one env per frame), and the grasp region
+            # can move tens of mm across the trajectory (measured ~87x34x46mm spread for t3's
+            # plate) -- a single local grid centered on one frame silently misses every other
+            # frame's query points (grid_sample's border-clamp then reports a safely-negative,
+            # WRONG value instead of erroring, so this failed silently: collision_loss stayed
+            # exactly 0.0 for the whole plate optimization until this was caught by comparing
+            # dof_pos to an unmodified baseline run). Full-object grids at 0.4mm with
+            # area-scaled sample density were validated in build_and_validate_sdf.py to recover
+            # the dominant penetration point within <0.04mm even for the plate (24x24cm
+            # footprint, 62.5M voxels, 250MB) -- tractable for every TACO object measured so far.
+            self._obj_sdf, self._obj_sdf_lo, self._obj_sdf_hi = load_or_build_object_sdf(
+                self._taco_obj_id, voxel_mm=0.4, device=self.sim_device
+            )
+            cprint(f"[collision term] obj={self._taco_obj_id} weight={collision_weight}", "yellow")
+
         opt_wrist_pos = torch.tensor(
-            target_wrist_pos + offset,
+            init_wrist_pos if init_wrist_pos is not None else (target_wrist_pos + offset),
             device=self.sim_device,
             dtype=torch.float32,
             requires_grad=True,
         )
         opt_wrist_rot = torch.tensor(
-            rotmat_to_rot6d(target_wrist_rot), device=self.sim_device, dtype=torch.float32, requires_grad=True
+            init_wrist_rot if init_wrist_rot is not None else rotmat_to_rot6d(target_wrist_rot),
+            device=self.sim_device,
+            dtype=torch.float32,
+            requires_grad=True,
         )
         opt_dof_pos = torch.tensor(
-            self.dexhand_default_dof_pos["pos"][None].repeat(self.num_envs, axis=0),
+            init_dof_pos if init_dof_pos is not None else self.dexhand_default_dof_pos["pos"][None].repeat(self.num_envs, axis=0),
             device=self.sim_device,
             dtype=torch.float32,
             requires_grad=True,
@@ -342,6 +417,25 @@ class Mano2Dexhand:
         opti = torch.optim.Adam(
             [{"params": [opt_wrist_pos, opt_wrist_rot], "lr": 0.0008}, {"params": [opt_dof_pos], "lr": 0.0004}]
         )
+
+        start_iter = 0
+        if resume and checkpoint_path is not None and os.path.exists(checkpoint_path):
+            # Recovery for the recurring mid-run crash (native-level SIGSEGV, no Python
+            # traceback via faulthandler, no accessible dmesg/gdb to root-cause further --
+            # happens across collision_weight=0 and >0 alike, so it's not specific to the
+            # collision term's added ops). Since gradients are per-env independent and Adam's
+            # own state is per-element too (no cross-iteration coupling beyond its own moment
+            # estimates), resuming from a periodic checkpoint reproduces the same trajectory a
+            # single uninterrupted run would have taken, just possibly across multiple process
+            # restarts.
+            ckpt = torch.load(checkpoint_path, map_location=self.sim_device)
+            with torch.no_grad():
+                opt_wrist_pos.copy_(ckpt["opt_wrist_pos"])
+                opt_wrist_rot.copy_(ckpt["opt_wrist_rot"])
+                opt_dof_pos.copy_(ckpt["opt_dof_pos"])
+            opti.load_state_dict(ckpt["optimizer"])
+            start_iter = ckpt["iter"]
+            cprint(f"[checkpoint] resumed from {checkpoint_path} at iter {start_iter}", "yellow")
 
         weight = []
         for k in self.dexhand.body_names:
@@ -366,7 +460,7 @@ class Mano2Dexhand:
             else:
                 weight.append(1)
         weight = torch.tensor(weight, device=self.sim_device, dtype=torch.float32)
-        iter = 0
+        iter = start_iter
         past_loss = 1e10
         while (self.headless and iter < max_iter) or (
             not self.headless and not self.gym.query_viewer_has_closed(self.viewer)
@@ -417,13 +511,82 @@ class Mano2Dexhand:
             target_joints = torch.cat([target_wrist_pos[:, None], target_mano_joints], dim=1)
             for k in range(len(self.mano_joint_points)):
                 self.mano_joint_points[k][:, :3] = target_joints[:, k]
-            loss = torch.mean(torch.norm(pk_joints - target_joints, dim=-1) * weight[None])
+            tracking_loss = tracking_weight_scale * torch.mean(torch.norm(pk_joints - target_joints, dim=-1) * weight[None])
+
+            collision_loss = torch.zeros((), device=self.sim_device)
+            if collision_weight > 0:
+                wrist_R = rot6d_to_rotmat(opt_wrist_rot)  # (nE, 3, 3)
+                obj_R = obj_trajectory[:, :3, :3]  # (nE, 3, 3), fixed (not optimized)
+                obj_t = obj_trajectory[:, :3, 3]  # (nE, 3)
+                per_link_max_pen = []
+                for body_name in self._collision_link_body_names:
+                    link_key = body_name[2:]  # strip R_/L_ prefix directly -- see __init__ note on why not to_hand()
+                    local_pts = self._collision_link_local_points[link_key]  # (nP, 3), fixed
+
+                    chain_mat = ret[body_name].get_matrix()  # (nE, 4, 4)
+                    chain_R = chain_mat[:, :3, :3]
+                    chain_t = chain_mat[:, :3, 3]
+
+                    # link-local -> chain frame -> wrist/world frame -> object-local frame
+                    pts_chain = local_pts[None] @ chain_R.transpose(-1, -2) + chain_t[:, None, :]  # (nE,nP,3)
+                    pts_world = (wrist_R @ pts_chain.transpose(-1, -2)).transpose(-1, -2) + opt_wrist_pos[:, None, :]
+                    pts_obj_local = (pts_world - obj_t[:, None, :]) @ obj_R  # (nE,nP,3); obj_R orthonormal
+
+                    sdf_vals = query_sdf(self._obj_sdf, self._obj_sdf_lo, self._obj_sdf_hi, pts_obj_local)  # (nE,nP)
+                    per_link_max_pen.append(F.relu(sdf_vals).max(dim=-1).values)  # (nE,) one-sided hinge
+                per_env_worst = torch.stack(per_link_max_pen, dim=-1).amax(dim=-1)  # (nE,): worst link per env
+                # Reverted from top-k/softmax back to plain mean over envs: opt_wrist_pos/
+                # opt_wrist_rot/opt_dof_pos are independent per-env parameters with no shared
+                # term anywhere in this loop (no smoothness/temporal regularizer), so gradients
+                # are per-env independent -- a mean cannot let the optimizer "trade" one frame's
+                # quality for another's (d(mean of independent terms)/d(param_i) only involves
+                # param_i, scaled by a constant 1/nE for every env alike). The earlier "frame 100
+                # got sacrificed" diagnosis was wrong for that reason. top-k/softmax instead
+                # concentrated ~all gradient onto whichever 1-few envs were currently worst,
+                # starving the rest of gradient entirely (confirmed: frames 60/130 never
+                # improved) and caused a reproducible mid-run segfault from the resulting
+                # discontinuous env selection. Mean gives every frame its full, undiluted
+                # per-env gradient direction every iteration.
+                collision_loss = per_env_worst.mean()
+
+            loss = tracking_loss + collision_weight * collision_loss
+
+            if collision_weight > 0 and iter == 1:
+                # Weight calibration diagnostic: report raw term values AND gradient magnitudes
+                # (w.r.t. opt_dof_pos) BEFORE combining, so the collision term's influence can
+                # be judged directly rather than guessed from the loss ratio alone.
+                g_track = torch.autograd.grad(tracking_loss, opt_dof_pos, retain_graph=True)[0]
+                if collision_loss.requires_grad:
+                    g_coll = torch.autograd.grad(collision_loss, opt_dof_pos, retain_graph=True)[0]
+                    g_coll_norm = g_coll.norm().item()
+                else:
+                    g_coll_norm = 0.0
+                cprint(
+                    f"[iter1 diag] tracking_loss={tracking_loss.item():.5f} (grad_norm={g_track.norm().item():.5f})  "
+                    f"collision_loss={collision_loss.item():.5f} (grad_norm={g_coll_norm:.5f})  "
+                    f"weighted_collision={(collision_weight*collision_loss).item():.5f}  "
+                    f"weighted_collision_grad_norm={collision_weight*g_coll_norm:.5f}",
+                    "cyan",
+                )
+
             opti.zero_grad()
             loss.backward()
             opti.step()
 
+            if checkpoint_path is not None and iter % checkpoint_every == 0:
+                torch.save(
+                    {
+                        "iter": iter,
+                        "opt_wrist_pos": opt_wrist_pos.detach(),
+                        "opt_wrist_rot": opt_wrist_rot.detach(),
+                        "opt_dof_pos": opt_dof_pos.detach(),
+                        "optimizer": opti.state_dict(),
+                    },
+                    checkpoint_path,
+                )
+
             if iter % 100 == 0:
-                cprint(f"{iter} {loss.item()}", "green")
+                cprint(f"{iter} {loss.item()} (tracking={tracking_loss.item():.5f} collision={collision_loss.item():.5f})", "green")
                 if iter > 1 and past_loss - loss.item() < 1e-5:
                     break
                 past_loss = loss.item()
@@ -466,6 +629,26 @@ if __name__ == "__main__":
                 "type": str,
                 "default": "right",
             },
+            {
+                "name": "--collision_weight",
+                "type": float,
+                "default": 0.0,
+            },
+            {
+                "name": "--warmstart_from",
+                "type": str,
+                "default": "",
+            },
+            {
+                "name": "--checkpoint_path",
+                "type": str,
+                "default": "",
+            },
+            {
+                "name": "--resume",
+                "type": int,
+                "default": 0,
+            },
         ],
     )
 
@@ -489,12 +672,34 @@ if __name__ == "__main__":
 
         mano2inspire = Mano2Dexhand(parser, dexhand, demo_data["obj_urdf_path"][0])
 
+        warmstart_kwargs = {}
+        if parser.warmstart_from:
+            # Warm-start opt_wrist_pos/opt_wrist_rot/opt_dof_pos from an existing (e.g.
+            # pre-collision-term) retargeting pkl instead of the hardcoded default pose --
+            # confirmed via diag_warmstart_test.py that this alone resolves the collision term's
+            # tunneling-through-thin-objects failure mode (a one-sided hinge from a generic
+            # default pose can push a link straight through a thin object to the far side, where
+            # the SDF reads "clear" even though the swept path interpenetrated; starting already
+            # correctly-sided next to a near-feasible solution avoids ever needing to cross).
+            with open(parser.warmstart_from, "rb") as f:
+                warmstart = pickle.load(f)
+            warmstart_kwargs["init_wrist_pos"] = warmstart["opt_wrist_pos"]
+            warmstart_kwargs["init_wrist_rot"] = (
+                aa_to_rot6d(torch.tensor(warmstart["opt_wrist_rot"], device="cuda:0", dtype=torch.float32)).cpu().numpy()
+            )
+            warmstart_kwargs["init_dof_pos"] = warmstart["opt_dof_pos"]
+            cprint(f"[warmstart] initializing from {parser.warmstart_from}", "yellow")
+
         to_dump = mano2inspire.fitting(
             parser.iter,
             demo_data["obj_trajectory"],
             demo_data["wrist_pos"],
             demo_data["wrist_rot"],
             demo_data["mano_joints"].view(parser.num_envs, -1, 3),
+            collision_weight=parser.collision_weight,
+            checkpoint_path=parser.checkpoint_path or None,
+            resume=bool(parser.resume),
+            **warmstart_kwargs,
         )
 
         if dataset_type == "oakink2":
@@ -519,5 +724,6 @@ if __name__ == "__main__":
         os.makedirs(os.path.dirname(dump_path), exist_ok=True)
         with open(dump_path, "wb") as f:
             pickle.dump(to_dump, f)
+        cprint(f"[DONE] saved {dump_path}", "magenta")
 
     run(_parser, _parser.data_idx)

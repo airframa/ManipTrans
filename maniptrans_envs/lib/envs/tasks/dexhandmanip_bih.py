@@ -105,6 +105,12 @@ class DexHandManipBiHEnv(VecTask):
         self.tighten_factor = self.cfg["env"]["tightenFactor"]
         self.tighten_steps = self.cfg["env"]["tightenSteps"]
 
+        self.obj_pos_reward_coef_loose = self.cfg["env"]["objPosRewardCoefLoose"]
+        self.obj_pos_reward_coef_tight = self.cfg["env"]["objPosRewardCoefTight"]
+        self.obj_rot_reward_coef_loose = self.cfg["env"]["objRotRewardCoefLoose"]
+        self.obj_rot_reward_coef_tight = self.cfg["env"]["objRotRewardCoefTight"]
+        self.reward_coef_tighten_steps = self.cfg["env"]["rewardCoefTightenSteps"]
+
         self.rollout_len = self.cfg["env"].get("rolloutLen", None)
         self.rollout_begin = self.cfg["env"].get("rolloutBegin", None)
 
@@ -1081,6 +1087,21 @@ class DexHandManipBiHEnv(VecTask):
         else:
             scale_factor = 1.0
 
+        if self.training:
+            last_step = self.gym.get_frame_count(self.sim)
+            reward_decay = (np.e * 2) ** (-1 * last_step / self.reward_coef_tighten_steps)
+            obj_pos_reward_coef = (
+                self.obj_pos_reward_coef_tight
+                - (self.obj_pos_reward_coef_tight - self.obj_pos_reward_coef_loose) * reward_decay
+            )
+            obj_rot_reward_coef = (
+                self.obj_rot_reward_coef_tight
+                - (self.obj_rot_reward_coef_tight - self.obj_rot_reward_coef_loose) * reward_decay
+            )
+        else:
+            obj_pos_reward_coef = self.obj_pos_reward_coef_tight
+            obj_rot_reward_coef = self.obj_rot_reward_coef_tight
+
         assert not self.headless or isinstance(compute_imitation_reward, torch.jit.ScriptFunction)
 
         if self.rollout_len is not None:
@@ -1096,6 +1117,8 @@ class DexHandManipBiHEnv(VecTask):
             max_length,
             scale_factor,
             (self.dexhand_rh if side == "rh" else self.dexhand_lh).weight_idx,
+            obj_pos_reward_coef,
+            obj_rot_reward_coef,
         )
         self.total_rew_buf += rew_buf
         return rew_buf, reset_buf, success_buf, failure_buf, reward_dict, error_buf
@@ -1850,9 +1873,11 @@ def compute_imitation_reward(
     max_length: List[int],
     scale_factor: float,
     dexhand_weight_idx: Dict[str, List[int]],
+    obj_pos_reward_coef: float,
+    obj_rot_reward_coef: float,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
 
-    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float,  Dict[str, List[int]]) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
+    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float,  Dict[str, List[int]], float, float) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
 
     # end effector pose reward
     current_eef_pos = states["base_state"][:, :3]
@@ -1918,11 +1943,11 @@ def compute_imitation_reward(
     diff_obj_pos = target_obj_pos - current_obj_pos
     diff_obj_pos_dist = torch.norm(diff_obj_pos, dim=-1)
 
-    reward_obj_pos = torch.exp(-80 * diff_obj_pos_dist)
+    reward_obj_pos = torch.exp(-obj_pos_reward_coef * diff_obj_pos_dist)
 
     diff_obj_rot = quat_mul(target_obj_quat, quat_conjugate(current_obj_quat))
     diff_obj_rot_angle = quat_to_angle_axis(diff_obj_rot)[0]
-    reward_obj_rot = torch.exp(-3 * (diff_obj_rot_angle).abs())
+    reward_obj_rot = torch.exp(-obj_rot_reward_coef * (diff_obj_rot_angle).abs())
 
     current_obj_vel = states["manip_obj_vel"]
     target_obj_vel = target_states["manip_obj_vel"]
